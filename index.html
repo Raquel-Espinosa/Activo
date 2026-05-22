@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Control Activos CEDIS</title>
+    
+    <!-- Tailwind CSS para Estilos -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React y ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel para compilar JSX en el navegador -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- FontAwesome para Iconos -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        /* Estilos base y scrollbars */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .fade-in { animation: fadeIn 0.2s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
+        .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans antialiased overflow-hidden">
+    
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // --- CONFIGURACIÓN DE GOOGLE SHEETS ---
+        const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbz5GnNX1ioq9_ix9deqVYw8Y7QPw3NPCk_5A8giPkS6yNKIHSdVHUhpX8ReVj5AYDXpDg/exec';
+
+        // --- MOCK DATA (Respaldo si falla internet) ---
+        const INITIAL_ASSETS = [
+            { id: 'RF-001', type: 'Escáner RF', brand: 'Zebra', model: 'TC52', zone: 'Recepción', status: 'Operativo', user: '', serialNumber: 'SN-001', acquisitionDate: '2023-11-01', features: 'Android 10', lastMaintenance: '2026-04-15' },
+            { id: 'MT-001', type: 'Montacargas', brand: 'Toyota', model: 'Reach', zone: 'Pasillo 1', status: 'En uso', user: 'Carlos Ruiz (1002)', serialNumber: 'MT-554', acquisitionDate: '2022-05-10', features: 'Eléctrico', lastMaintenance: '2026-01-20' }
+        ];
+        const INITIAL_TICKETS = [{ id: 'TK-101', assetId: 'RF-001', type: 'Correctivo', priority: 'Alta', reportedBy: 'Juan Pérez', date: '2026-05-08', status: 'Pendiente', description: 'Ejemplo de ticket.' }];
+        const INITIAL_USERS = [
+            { id: 'EMP-1001', name: 'Juan Pérez', role: 'Operativo', status: 'Activo', password: '1234' }, 
+            { id: 'EMP-3001', name: 'Luis Martínez', role: 'Administrador', status: 'Activo', password: '1234' }
+        ];
+
+        const getStatusColor = (status) => {
+            const s = String(status).trim().toLowerCase();
+            if(s === 'operativo') return 'bg-emerald-100 text-emerald-800 border-emerald-200';
+            if(s === 'en uso') return 'bg-blue-100 text-blue-800 border-blue-200';
+            if(s === 'dañado' || s === 'baja') return 'bg-red-100 text-red-800 border-red-200';
+            if(s === 'en reparación') return 'bg-amber-100 text-amber-800 border-amber-200';
+            return 'bg-gray-100 text-gray-800 border-gray-200';
+        };
+
+        const getIconForType = (type) => {
+            const t = String(type).trim().toLowerCase();
+            if(t.includes('escáner') || t.includes('rf')) return <i className="fa-solid fa-mobile-screen"></i>;
+            if(t.includes('impresora')) return <i className="fa-solid fa-print"></i>;
+            if(t.includes('montacargas')) return <i className="fa-solid fa-truck-ramp-box"></i>;
+            if(t.includes('pc') || t.includes('laptop')) return <i className="fa-solid fa-desktop"></i>;
+            return <i className="fa-solid fa-box"></i>;
+        };
+
+        const BoxIconSVG = () => (
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5 text-white">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                <line x1="12" y1="22.08" x2="12" y2="12"></line>
+            </svg>
+        );
+
+        function App() {
+            // Estados globales
+            const [isAppLoading, setIsAppLoading] = useState(true);
+            const [assets, setAssets] = useState([]);
+            const [tickets, setTickets] = useState([]);
+            const [systemUsers, setSystemUsers] = useState([]);
+
+            // Autenticación y Navegación
+            const [isAuthenticated, setIsAuthenticated] = useState(false);
+            const [currentUser, setCurrentUser] = useState(null);
+            const [role, setRole] = useState('Administrador');
+            const [currentView, setCurrentView] = useState('dashboard');
+            
+            // Sync y Configuración
+            const [syncStatus, setSyncStatus] = useState('idle');
+            const [appConfig, setAppConfig] = useState({ autoSyncSheets: true, emailNotifications: true });
+
+            // Modales
+            const [showScanner, setShowScanner] = useState(false);
+            const [scannedAsset, setScannedAsset] = useState(null);
+            
+            const [showNewAssetModal, setShowNewAssetModal] = useState(false);
+            const [newAssetData, setNewAssetData] = useState({ id: '', type: 'Escáner RF', brand: '', model: '', zone: '', status: 'Operativo', serialNumber: '', responsibleName: '', employeeNumber: '', acquisitionDate: '', features: '' });
+
+            const [showNewTicketModal, setShowNewTicketModal] = useState(false);
+            const [newTicketData, setNewTicketData] = useState({ assetId: '', type: 'Correctivo', priority: 'Media', description: '', reportedBy: '' });
+
+            const [showNewUserModal, setShowNewUserModal] = useState(false);
+            const [newUserData, setNewUserData] = useState({ id: '', name: '', role: 'Operativo', password: '' });
+
+            const [showDiagnosticModal, setShowDiagnosticModal] = useState(false);
+            const [selectedTicket, setSelectedTicket] = useState(null);
+            const [diagnosticNote, setDiagnosticNote] = useState('');
+
+            useEffect(() => {
+                const fetchInitialData = async () => {
+                    try {
+                        const response = await fetch(GOOGLE_SCRIPT_URL, { method: 'GET', redirect: 'follow' });
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            setAssets(data.data.assets && data.data.assets.length > 0 ? data.data.assets : INITIAL_ASSETS);
+                            setTickets(data.data.tickets && data.data.tickets.length > 0 ? data.data.tickets : INITIAL_TICKETS);
+                            setSystemUsers(data.data.users && data.data.users.length > 0 ? data.data.users : INITIAL_USERS);
+                        } else throw new Error('Error al leer de Sheets');
+                    } catch (error) {
+                        console.warn("Usando datos locales por falta de red o CORS.", error.message);
+                        setAssets(INITIAL_ASSETS); setTickets(INITIAL_TICKETS); setSystemUsers(INITIAL_USERS);
+                    } finally {
+                        setIsAppLoading(false);
+                    }
+                };
+                fetchInitialData();
+            }, []);
+
+            const handleSyncToSheets = async (forcedData = null) => {
+                setSyncStatus('syncing');
+                try {
+                    const payload = forcedData || { assets, tickets, users: systemUsers };
+                    await fetch(GOOGLE_SCRIPT_URL, {
+                        method: 'POST', mode: 'no-cors', body: JSON.stringify(payload), headers: { 'Content-Type': 'text/plain;charset=utf-8' }
+                    });
+                    setSyncStatus('success'); setTimeout(() => setSyncStatus('idle'), 3000);
+                } catch (error) {
+                    setSyncStatus('error'); setTimeout(() => setSyncStatus('idle'), 3000);
+                }
+            };
+
+            const updateDataAndSync = (newAssets, newTickets, newUsers) => {
+                setAssets(newAssets); setTickets(newTickets); setSystemUsers(newUsers);
+                if (appConfig.autoSyncSheets) handleSyncToSheets({ assets: newAssets, tickets: newTickets, users: newUsers });
+            };
+
+            const [loginData, setLoginData] = useState({ empId: '', password: '' });
+            const [loginError, setLoginError] = useState('');
+
+            const handleLogin = (e) => {
+                e.preventDefault();
+                const inputEmpId = String(loginData.empId).trim().toUpperCase();
+                const inputPassword = String(loginData.password).trim();
+                const user = systemUsers.find(u => String(u.id).trim().toUpperCase() === inputEmpId);
+                
+                if (user && String(user.password).trim() === inputPassword && String(user.status).trim().toUpperCase() === 'ACTIVO') {
+                    setCurrentUser(user); setRole(user.role); setIsAuthenticated(true); setLoginError(''); setLoginData({ empId: '', password: '' });
+                    setCurrentView(user.role === 'Operativo' ? 'scanner_home' : 'dashboard');
+                } else {
+                    setLoginError('Número de empleado o contraseña incorrectos.');
+                }
+            };
+
+            const handleLogout = () => { setIsAuthenticated(false); setCurrentUser(null); setCurrentView('dashboard'); };
+
+            const handleAddAsset = (e) => {
+                e.preventDefault(); if (!newAssetData.id) return;
+                const newAsset = { ...newAssetData, user: newAssetData.responsibleName ? `${newAssetData.responsibleName} (${newAssetData.employeeNumber || 'Sin N°'})` : null, lastMaintenance: new Date().toISOString().split('T')[0] };
+                updateDataAndSync([...assets, newAsset], tickets, systemUsers);
+                setShowNewAssetModal(false); setNewAssetData({ id: '', type: 'Escáner RF', brand: '', model: '', zone: '', status: 'Operativo', serialNumber: '', responsibleName: '', employeeNumber: '', acquisitionDate: '', features: '' });
+            };
+
+            const handleAddTicket = (e) => {
+                e.preventDefault(); if (!newTicketData.assetId) return;
+                const newTicket = { id: `TK-${Math.floor(Math.random() * 900) + 100}`, ...newTicketData, date: new Date().toISOString().split('T')[0], status: 'Pendiente' };
+                let updatedAssets = assets;
+                const targetAssetId = String(newTicketData.assetId).trim();
+                
+                if (newTicketData.type === 'Correctivo') {
+                    updatedAssets = assets.map(a => String(a.id).trim() === targetAssetId ? { ...a, status: 'Dañado' } : a);
+                }
+                updateDataAndSync(updatedAssets, [newTicket, ...tickets], systemUsers);
+                setShowNewTicketModal(false); setNewTicketData({ assetId: '', type: 'Correctivo', priority: 'Media', description: '', reportedBy: '' });
+            };
+
+            const handleAddUser = (e) => {
+                e.preventDefault(); if (!newUserData.id) return;
+                updateDataAndSync(assets, tickets, [...systemUsers, { ...newUserData, status: 'Activo' }]);
+                setShowNewUserModal(false); setNewUserData({ id: '', name: '', role: 'Operativo', password: '' });
+            };
+
+            const handleAttendTicket = (ticketId, currentStatus, assetId) => {
+                const statusStr = String(currentStatus).trim().toLowerCase();
+                const tId = String(ticketId).trim();
+                const aId = String(assetId).trim();
+                let updatedTickets = [...tickets]; let updatedAssets = [...assets];
+
+                if (statusStr === 'pendiente') updatedTickets = tickets.map(t => String(t.id).trim() === tId ? { ...t, status: 'En proceso' } : t);
+                else if (statusStr === 'en proceso') {
+                    updatedTickets = tickets.map(t => String(t.id).trim() === tId ? { ...t, status: 'Resuelto' } : t);
+                    updatedAssets = assets.map(a => String(a.id).trim() === aId ? { ...a, status: 'Operativo' } : a);
+                }
+                updateDataAndSync(updatedAssets, updatedTickets, systemUsers);
+            };
+
+            const handleSaveDiagnostic = (e) => {
+                e.preventDefault(); if (!selectedTicket || !diagnosticNote) return;
+                const tId = String(selectedTicket.id).trim();
+                updateDataAndSync(assets, tickets.map(t => String(t.id).trim() === tId ? { ...t, description: t.description + `\n\n[Diagnóstico]: ${diagnosticNote}` } : t), systemUsers);
+                setShowDiagnosticModal(false); setDiagnosticNote(''); setSelectedTicket(null);
+            };
+
+            if (isAppLoading) return (
+                <div className="h-screen w-screen flex flex-col items-center justify-center bg-slate-50">
+                    <i className="fa-solid fa-circle-notch fa-spin text-4xl text-blue-600 mb-4"></i>
+                    <h2 className="text-xl font-bold text-slate-800">Conectando con CEDIS...</h2>
+                </div>
+            );
+
+            if (!isAuthenticated) return (
+                <div className="h-screen w-screen bg-slate-100 flex items-center justify-center p-4">
+                    <div className="bg-white max-w-md w-full rounded-3xl shadow-xl overflow-hidden border border-slate-200 fade-in">
+                        <div className="bg-blue-600 p-8 text-center text-white flex flex-col items-center">
+                            <div className="bg-white/20 p-4 rounded-full mb-4"><BoxIconSVG /></div>
+                            <h1 className="text-2xl font-bold tracking-tight">CEDIS Activos</h1>
+                        </div>
+                        <div className="p-8">
+                            <h2 className="text-lg font-bold text-slate-800 mb-6 text-center">Iniciar Sesión</h2>
+                            {loginError && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm mb-4 border border-red-100"><i className="fa-solid fa-triangle-exclamation mr-2"></i>{loginError}</div>}
+                            <form onSubmit={handleLogin} className="space-y-5">
+                                <div>
+                                    <label className="text-sm font-medium text-slate-700 block mb-1">Nº de Empleado</label>
+                                    <div className="relative">
+                                        <i className="fa-regular fa-user absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+                                        <input type="text" required value={loginData.empId} onChange={(e) => setLoginData({...loginData, empId: e.target.value})} className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Ej. EMP-1001" />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="text-sm font-medium text-slate-700 block mb-1">Contraseña</label>
+                                    <div className="relative">
+                                        <i className="fa-solid fa-lock absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
+                                        <input type="password" required value={loginData.password} onChange={(e) => setLoginData({...loginData, password: e.target.value})} className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="••••••••" />
+                                    </div>
+                                </div>
+                                <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3.5 rounded-xl hover:bg-blue-700 transition-colors shadow-md mt-2">Acceder al Sistema</button>
+                            </form>
+                            <div className="mt-6 text-center text-xs text-slate-400">Prueba: EMP-3001 | 1234</div>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const renderDashboardView = () => {
+                const totalAssets = assets.length;
+                const operative = assets.filter(a => ['operativo', 'en uso'].includes(String(a.status).toLowerCase())).length;
+                const availability = totalAssets > 0 ? Math.round((operative / totalAssets) * 100) : 0;
+                const issues = assets.filter(a => ['dañado', 'en reparación'].includes(String(a.status).toLowerCase())).length;
+                
+                // Calcular activos por categoría para la gráfica
+                const assetsByType = assets.reduce((acc, asset) => { acc[asset.type] = (acc[asset.type] || 0) + 1; return acc; }, {});
+                const sortedTypes = Object.entries(assetsByType).sort((a, b) => b[1] - a[1]);
+                const maxAssetsInType = sortedTypes.length > 0 ? sortedTypes[0][1] : 1;
+
+                return (
+                    <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-6 pb-24 fade-in">
+                        <div className="flex justify-between items-center">
+                            <h1 className="text-2xl font-bold text-slate-800">Panel de Control</h1>
+                            <button onClick={() => handleSyncToSheets()} disabled={syncStatus === 'syncing'} className={`${syncStatus==='error'?'bg-red-600':'bg-emerald-600'} text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-all`}>
+                                {syncStatus === 'syncing' ? <i className="fa-solid fa-spinner fa-spin"></i> : syncStatus === 'success' ? <i className="fa-solid fa-circle-check"></i> : <i className="fa-solid fa-cloud-arrow-up"></i>}
+                                <span className="hidden sm:inline">{syncStatus==='syncing'?'Guardando...':syncStatus==='success'?'Guardado':'Sincronizar'}</span>
+                            </button>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <div className="bg-white p-4 rounded-xl border shadow-sm"><span className="text-sm font-medium text-slate-500">Disponibilidad</span><div className="text-3xl font-bold text-slate-800">{availability}%</div></div>
+                            <div className="bg-white p-4 rounded-xl border shadow-sm"><span className="text-sm font-medium text-slate-500">Activos Totales</span><div className="text-3xl font-bold text-slate-800">{totalAssets}</div></div>
+                            <div className="bg-white p-4 rounded-xl border shadow-sm"><span className="text-sm font-medium text-slate-500">Fuera de Servicio</span><div className="text-3xl font-bold text-red-600">{issues}</div></div>
+                            <div className="bg-white p-4 rounded-xl border shadow-sm"><span className="text-sm font-medium text-slate-500">MTTR (Promedio)</span><div className="text-3xl font-bold text-slate-800">4.2<span className="text-sm font-normal text-slate-500">h</span></div></div>
+                        </div>
+                        
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+                            {/* GRÁFICA DE BARRAS DE ACTIVOS */}
+                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm mt-6">
+                                <div className="p-4 border-b border-slate-100 bg-slate-50"><h2 className="font-semibold text-slate-800">Activos por Categoría</h2></div>
+                                <div className="p-6 space-y-5">
+                                    {sortedTypes.length === 0 ? <p className="text-center text-slate-500">No hay activos.</p> : sortedTypes.map(([type, count]) => {
+                                        const percentage = Math.round((count / totalAssets) * 100);
+                                        const barWidth = Math.round((count / maxAssetsInType) * 100);
+                                        return (
+                                            <div key={type}>
+                                                <div className="flex justify-between items-center mb-1"><span className="text-sm font-medium flex items-center gap-2 text-slate-600">{getIconForType(type)} {type}</span><span className="text-sm font-bold">{count} <span className="text-xs text-slate-400 font-normal">({percentage}%)</span></span></div>
+                                                <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden"><div className="bg-blue-500 h-full rounded-full transition-all duration-500" style={{ width: `${barWidth}%` }}></div></div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                            
+                            <div className="bg-white rounded-xl border border-slate-200 shadow-sm mt-6 flex flex-col">
+                                <div className="p-4 border-b border-slate-100 bg-slate-50"><h2 className="font-semibold text-slate-800">Tickets Recientes</h2></div>
+                                <div className="divide-y divide-slate-100 overflow-y-auto max-h-[300px]">
+                                    {tickets.slice(0, 4).map(ticket => {
+                                        const statusStr = String(ticket.status).trim().toLowerCase();
+                                        return (
+                                        <div key={ticket.id} className="p-4 flex justify-between items-center">
+                                            <div className="flex gap-3 items-center">
+                                                <div className={`p-2 rounded-lg ${ticket.priority === 'Alta' ? 'bg-red-100 text-red-600' : ticket.priority === 'Media' ? 'bg-amber-100 text-amber-600' : 'bg-blue-100 text-blue-600'}`}><i className="fa-solid fa-wrench"></i></div>
+                                                <div><p className="text-sm font-medium text-slate-800">{ticket.id} • {ticket.assetId}</p><p className="text-xs text-slate-500 line-clamp-1">{ticket.description}</p></div>
+                                            </div>
+                                            <span className={`text-xs px-2 py-1 rounded-full font-medium ${statusStr === 'pendiente' ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-slate-100 text-slate-600'}`}>{ticket.status}</span>
+                                        </div>
+                                    )})}
+                                    {tickets.length===0 && <p className="p-4 text-center text-slate-500">Sin tickets.</p>}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderInventoryView = () => (
+                <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-4 pb-24 fade-in">
+                    <div className="flex justify-between items-center mb-6"><h1 className="text-2xl font-bold text-slate-800">Catálogo de Activos</h1><button onClick={() => setShowNewAssetModal(true)} className="p-2 bg-blue-600 rounded-lg text-white px-4 hover:bg-blue-700 transition-colors"><i className="fa-solid fa-plus mr-1"></i> Nuevo</button></div>
+                    <div className="bg-white border rounded-xl shadow-sm overflow-x-auto">
+                        <table className="w-full text-left border-collapse min-w-[1000px]">
+                            <thead><tr className="bg-slate-50 text-slate-500 text-xs uppercase border-b"><th className="p-4">Activo / Serie</th><th className="p-4">Ubicación</th><th className="p-4">Estado</th><th className="p-4">Asignación</th><th className="p-4">Fecha Adq.</th><th className="p-4">Características</th></tr></thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {assets.map(a => (
+                                    <tr key={a.id} className="hover:bg-slate-50">
+                                        <td className="p-4 flex items-center gap-3"><div className="p-2 bg-slate-100 rounded text-slate-500">{getIconForType(a.type)}</div><div><p className="font-semibold text-sm">{a.id}</p><p className="text-xs text-slate-500">{a.type} • {a.brand}<br/>SN: {a.serialNumber||'N/A'}</p></div></td>
+                                        <td className="p-4 text-sm">{a.zone}</td>
+                                        <td className="p-4"><span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${getStatusColor(a.status)}`}>{a.status}</span></td>
+                                        <td className="p-4 text-sm">{a.user ? <><i className="fa-solid fa-user text-slate-400 mr-1"></i> {a.user}</> : <span className="italic text-slate-400">Sin asignar</span>}</td>
+                                        <td className="p-4 text-sm text-slate-500">{a.acquisitionDate || '-'}</td>
+                                        <td className="p-4 text-sm text-slate-500 max-w-[200px] truncate" title={a.features}>{a.features || '-'}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+
+            const renderMaintenanceView = () => (
+                <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-4 pb-24 fade-in">
+                    <div className="flex justify-between items-center mb-6"><h1 className="text-2xl font-bold text-slate-800">Mantenimiento</h1><button onClick={() => setShowNewTicketModal(true)} className="p-2 bg-blue-600 rounded-lg text-white px-4 hover:bg-blue-700 transition-colors"><i className="fa-solid fa-plus mr-1"></i> Nuevo Ticket</button></div>
+                    <div className="bg-white border rounded-xl shadow-sm divide-y">
+                        {tickets.map(t => {
+                            const statusStr = String(t.status).trim().toLowerCase();
+                            return (
+                            <div key={t.id} className="p-4 flex flex-col md:flex-row justify-between gap-4">
+                                <div className="flex-1"><div className="flex gap-2 items-center"><span className="font-bold">{t.id}</span><span className="text-xs bg-slate-100 px-2 rounded font-medium">{t.assetId}</span><span className={`text-xs px-2 py-0.5 rounded-full border ${t.priority === 'Alta' ? 'bg-red-50 text-red-700 border-red-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>{t.priority}</span></div><p className="text-sm mt-1 whitespace-pre-wrap">{t.description}</p><p className="text-xs text-slate-400 mt-1">Por: {t.reportedBy} el {t.date}</p></div>
+                                <div className="flex gap-2 shrink-0"><button onClick={() => { setSelectedTicket(t); setShowDiagnosticModal(true); }} className="px-3 py-1.5 text-sm border rounded-lg hover:bg-slate-50 transition-colors">Diagnóstico</button><button onClick={() => handleAttendTicket(t.id, t.status, t.assetId)} disabled={statusStr === 'resuelto'} className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${statusStr === 'pendiente' ? 'bg-blue-600 text-white' : statusStr === 'en proceso' ? 'bg-amber-500 text-white' : 'bg-emerald-100 text-emerald-700 border border-emerald-200 cursor-not-allowed'}`}>{statusStr === 'pendiente' ? 'Atender' : statusStr === 'en proceso' ? 'Finalizar' : 'Resuelto'}</button></div>
+                            </div>
+                        )})}
+                        {tickets.length===0 && <p className="p-6 text-center text-slate-500">No hay tickets.</p>}
+                    </div>
+                </div>
+            );
+
+            const renderUsersView = () => (
+                <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-4 pb-24 fade-in">
+                    <div className="flex justify-between items-center mb-6"><h1 className="text-2xl font-bold text-slate-800">Usuarios</h1><button onClick={() => setShowNewUserModal(true)} className="p-2 bg-blue-600 rounded-lg text-white px-4 hover:bg-blue-700 transition-colors"><i className="fa-solid fa-plus mr-1"></i> Nuevo</button></div>
+                    <div className="bg-white border rounded-xl shadow-sm overflow-x-auto">
+                        <table className="w-full text-left border-collapse min-w-[600px]">
+                            <thead><tr className="bg-slate-50 text-slate-500 text-xs uppercase border-b"><th className="p-4">Nº Empleado</th><th className="p-4">Nombre</th><th className="p-4">Rol</th><th className="p-4">Estado</th></tr></thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {systemUsers.map(u => (
+                                    <tr key={u.id} className="hover:bg-slate-50"><td className="p-4 font-bold">{u.id}</td><td className="p-4 text-sm flex items-center gap-2"><i className="fa-solid fa-user text-slate-400 bg-slate-100 p-2 rounded-full"></i>{u.name}</td><td className="p-4 text-sm">{u.role}</td><td className="p-4"><span className="px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full text-xs font-medium">{u.status}</span></td></tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+
+            const renderScannerHomeView = () => (
+                <div className="flex flex-col h-[calc(100vh-64px)] bg-slate-50 pb-16 fade-in">
+                    <div className="bg-blue-600 p-6 text-white rounded-b-3xl shadow-md"><h2 className="text-2xl font-bold">¡Hola, {currentUser?.name}!</h2><p className="text-blue-100 text-sm mt-1">Zona actual: Recepción A</p></div>
+                    <div className="flex-1 px-4 py-8 flex flex-col items-center justify-center max-w-md mx-auto w-full gap-6">
+                        <button onClick={() => setShowScanner(true)} className="w-48 h-48 bg-white rounded-full shadow-lg border-4 border-blue-100 flex flex-col items-center justify-center text-blue-600 active:scale-95 transition-transform"><i className="fa-solid fa-qrcode text-6xl mb-2"></i><span className="text-xl font-bold uppercase tracking-wide">Escanear</span></button>
+                    </div>
+                </div>
+            );
+
+            const renderLayout = () => (
+                <div className="flex h-screen overflow-hidden">
+                    {role !== 'Operativo' && (
+                        <div className="w-64 bg-slate-900 text-slate-300 hidden md:flex flex-col">
+                            <nav className="flex-1 py-6 px-3 space-y-1">
+                                {[{id:'dashboard', icon:'chart-simple', label:'Dashboard'}, {id:'inventory', icon:'box', label:'Inventario'}, {id:'maintenance', icon:'wrench', label:'Mantenimiento'}, {id:'users', icon:'users', label:'Usuarios'}].map(item => (
+                                    <button key={item.id} onClick={() => setCurrentView(item.id)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${currentView===item.id ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 hover:text-white'}`}><i className={`fa-solid fa-${item.icon} w-5`}></i> {item.label}</button>
+                                ))}
+                            </nav>
+                        </div>
+                    )}
+                    <div className="flex-1 flex flex-col h-full relative">
+                        <header className="bg-slate-900 text-white h-16 px-4 md:px-6 flex items-center justify-between sticky top-0 z-30">
+                            <div className="flex items-center gap-3"><div className="bg-blue-600 p-1.5 rounded-lg"><BoxIconSVG /></div><span className="font-bold text-lg hidden sm:block">Activos CEDIS</span><span className="font-bold sm:hidden">CEDIS</span></div>
+                            <div className="flex items-center gap-4">
+                                {syncStatus !== 'idle' && <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 bg-slate-800 rounded-full border border-slate-700"><i className={`fa-solid fa-${syncStatus==='syncing'?'spinner fa-spin text-blue-400':syncStatus==='success'?'circle-check text-emerald-400':'triangle-exclamation text-red-400'}`}></i><span className="text-xs text-slate-300 font-medium">{syncStatus==='syncing'?'Guardando...':syncStatus==='success'?'Guardado':'Error'}</span></div>}
+                                <div className="hidden sm:flex flex-col items-end"><span className="text-sm font-bold">{currentUser?.name}</span><span className="text-xs text-blue-300">{currentUser?.role}</span></div>
+                                <div className="w-8 h-8 bg-slate-700 rounded-full flex items-center justify-center"><i className="fa-solid fa-user text-xs"></i></div>
+                                <button onClick={handleLogout} className="text-slate-400 hover:text-white transition-colors"><i className="fa-solid fa-right-from-bracket"></i></button>
+                            </div>
+                        </header>
+                        <main className="flex-1 overflow-y-auto">
+                            {currentView === 'dashboard' && renderDashboardView()}
+                            {currentView === 'inventory' && renderInventoryView()}
+                            {currentView === 'maintenance' && renderMaintenanceView()}
+                            {currentView === 'users' && renderUsersView()}
+                            {currentView === 'scanner_home' && renderScannerHomeView()}
+                        </main>
+                        {role === 'Operativo' && (
+                            <div className="md:hidden fixed bottom-0 w-full bg-white border-t flex justify-around h-16 pb-safe z-40">
+                                <button onClick={()=>setCurrentView('scanner_home')} className="flex flex-col items-center justify-center w-20 text-blue-600"><i className="fa-solid fa-qrcode text-xl mb-1"></i><span className="text-[10px] font-bold">ESCANEAR</span></button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="h-screen w-screen font-sans">
+                    {renderLayout()}
+                    
+                    {/* Modal Nuevo Activo a 2 Columnas */}
+                    {showNewAssetModal && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl w-full max-w-2xl overflow-hidden shadow-xl fade-in">
+                                <div className="p-4 border-b flex justify-between bg-slate-50"><h3 className="font-bold text-lg">Registrar Activo</h3><button onClick={()=>setShowNewAssetModal(false)}><i className="fa-solid fa-xmark"></i></button></div>
+                                <form onSubmit={handleAddAsset} className="p-5 max-h-[85vh] overflow-y-auto">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className="space-y-3">
+                                            <h4 className="text-sm font-bold text-blue-600 uppercase border-b pb-1">Datos Técnicos</h4>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div><label className="text-xs font-medium">ID</label><input required value={newAssetData.id} onChange={e=>setNewAssetData({...newAssetData, id: e.target.value})} className="w-full border rounded-lg p-2 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                                <div><label className="text-xs font-medium">Nº Serie</label><input required value={newAssetData.serialNumber} onChange={e=>setNewAssetData({...newAssetData, serialNumber: e.target.value})} className="w-full border rounded-lg p-2 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                            </div>
+                                            <div><label className="text-xs font-medium">Categoría</label><select value={newAssetData.type} onChange={e=>setNewAssetData({...newAssetData, type: e.target.value})} className="w-full border rounded-lg p-2 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none"><option>Escáner RF</option><option>Impresora</option><option>Montacargas</option><option>PC</option><option>LapTop</option><option>Otro</option></select></div>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div><label className="text-xs font-medium">Marca</label><input required value={newAssetData.brand} onChange={e=>setNewAssetData({...newAssetData, brand: e.target.value})} className="w-full border rounded-lg p-2 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                                <div><label className="text-xs font-medium">Modelo</label><input required value={newAssetData.model} onChange={e=>setNewAssetData({...newAssetData, model: e.target.value})} className="w-full border rounded-lg p-2 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                            </div>
+                                            <div><label className="text-xs font-medium">Zona / Ubicación</label><input required value={newAssetData.zone} onChange={e=>setNewAssetData({...newAssetData, zone: e.target.value})} className="w-full border rounded-lg p-2 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                        </div>
+                                        <div className="space-y-3">
+                                            <h4 className="text-sm font-bold text-blue-600 uppercase border-b pb-1">Adquisición y Asignación</h4>
+                                            <div><label className="text-xs font-medium">Fecha Adquisición</label><input type="date" value={newAssetData.acquisitionDate} onChange={e=>setNewAssetData({...newAssetData, acquisitionDate: e.target.value})} className="w-full border rounded-lg p-2 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none"/></div>
+                                            <div><label className="text-xs font-medium">Características</label><textarea value={newAssetData.features} onChange={e=>setNewAssetData({...newAssetData, features: e.target.value})} className="w-full border rounded-lg p-2 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" rows="2"></textarea></div>
+                                            <div className="p-3 bg-slate-50 border rounded-xl mt-2"><h4 className="text-xs font-bold text-slate-500 uppercase mb-2">Responsable (Opcional)</h4><div className="grid grid-cols-2 gap-3"><div><label className="text-[10px] font-medium">Nombre</label><input value={newAssetData.responsibleName} onChange={e=>setNewAssetData({...newAssetData, responsibleName: e.target.value})} className="w-full border rounded-md p-1.5 mt-1 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div><div><label className="text-[10px] font-medium">Nº Empleado</label><input value={newAssetData.employeeNumber} onChange={e=>setNewAssetData({...newAssetData, employeeNumber: e.target.value})} className="w-full border rounded-md p-1.5 mt-1 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div></div></div>
+                                        </div>
+                                    </div>
+                                    <div className="mt-6 pt-4"><button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors">Guardar Activo</button></div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Modal Nuevo Ticket */}
+                    {showNewTicketModal && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-xl fade-in">
+                                <div className="p-4 border-b flex justify-between bg-slate-50"><h3 className="font-bold text-lg"><i className="fa-solid fa-wrench text-slate-600 mr-2"></i> Generar Ticket</h3><button onClick={()=>setShowNewTicketModal(false)}><i className="fa-solid fa-xmark"></i></button></div>
+                                <form onSubmit={handleAddTicket} className="p-5 space-y-4">
+                                    <div><label className="text-sm font-medium">ID del Equipo</label><input required value={newTicketData.assetId} onChange={e=>setNewTicketData({...newTicketData, assetId: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div><label className="text-sm font-medium">Tipo</label><select value={newTicketData.type} onChange={e=>setNewTicketData({...newTicketData, type: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none"><option>Correctivo</option><option>Preventivo</option></select></div>
+                                        <div><label className="text-sm font-medium">Prioridad</label><select value={newTicketData.priority} onChange={e=>setNewTicketData({...newTicketData, priority: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none"><option>Baja</option><option>Media</option><option>Alta</option></select></div>
+                                    </div>
+                                    <div><label className="text-sm font-medium">Descripción</label><textarea required value={newTicketData.description} onChange={e=>setNewTicketData({...newTicketData, description: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" rows="3"></textarea></div>
+                                    <div><label className="text-sm font-medium">Reportado por</label><input required value={newTicketData.reportedBy} onChange={e=>setNewTicketData({...newTicketData, reportedBy: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                    <button type="submit" className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl hover:bg-slate-900 transition-colors">Registrar Incidencia</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Modal Diagnóstico */}
+                    {showDiagnosticModal && selectedTicket && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-xl fade-in">
+                                <div className="p-4 border-b flex justify-between bg-slate-50"><h3 className="font-bold text-lg">Diagnóstico: {selectedTicket.id}</h3><button onClick={()=>{setShowDiagnosticModal(false); setSelectedTicket(null);}}><i className="fa-solid fa-xmark"></i></button></div>
+                                <form onSubmit={handleSaveDiagnostic} className="p-5 space-y-4">
+                                    <div className="bg-red-50 text-red-800 p-3 rounded-lg text-sm mb-4"><strong className="block mb-1">Falla Reportada:</strong>{selectedTicket.description}</div>
+                                    <div><label className="text-sm font-medium">Anotaciones del Técnico</label><textarea required value={diagnosticNote} onChange={e=>setDiagnosticNote(e.target.value)} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" rows="4"></textarea></div>
+                                    <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors">Guardar Diagnóstico</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Modal Nuevo Usuario con Contraseña */}
+                    {showNewUserModal && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-xl fade-in">
+                                <div className="p-4 border-b flex justify-between bg-slate-50"><h3 className="font-bold text-lg"><i className="fa-solid fa-users text-slate-600 mr-2"></i> Registrar Usuario</h3><button onClick={()=>setShowNewUserModal(false)}><i className="fa-solid fa-xmark"></i></button></div>
+                                <form onSubmit={handleAddUser} className="p-5 space-y-4">
+                                    <div><label className="text-sm font-medium">Nº de Empleado</label><input required value={newUserData.id} onChange={e=>setNewUserData({...newUserData, id: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                    <div><label className="text-sm font-medium">Nombre Completo</label><input required value={newUserData.name} onChange={e=>setNewUserData({...newUserData, name: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                    <div><label className="text-sm font-medium">Rol del Sistema</label><select value={newUserData.role} onChange={e=>setNewUserData({...newUserData, role: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none"><option>Operativo</option><option>Supervisor</option><option>Administrador</option></select></div>
+                                    <div><label className="text-sm font-medium">Contraseña</label><input required type="password" value={newUserData.password} onChange={e=>setNewUserData({...newUserData, password: e.target.value})} className="w-full border rounded-lg p-2.5 mt-1 focus:ring-2 focus:ring-blue-500 focus:outline-none" /></div>
+                                    <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors">Guardar Usuario</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
